@@ -30,7 +30,8 @@
     },
     "include": [
         "process.env.d.ts",
-        "./**/*.ts"
+        "./**/*.ts",
+        "scripts/generateHMACSecret.js"
     ],
     "exclude": [
         "node_modules"

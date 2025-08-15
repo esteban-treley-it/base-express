@@ -10,6 +10,8 @@
     "lint": "eslint ./src/**/*.ts --fix",
     "format": "prettier --write ./**/*.{ts,json}",
     "test": "jest --coverage=true -w=1 --forceExit --detectOpenHandles --watchAll=false --testPathPattern=src/__tests__ --testPathIgnorePatterns=build",
+    "generate-keys": "mkdir keys && openssl genpkey -algorithm RSA -out keys/private.pem -pkeyopt rsa_keygen_bits:2048",
+    "generate-hmac": "node ./scripts/generateHMACSecret.js",
     "docker:dev": "docker compose build && docker run --env-file .env.docker mileto-api",
     "docker:dev:nocache": "docker compose build --no-cache && docker compose up --env-file .env.docker"
   },
