@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  mileto-api:
+    build:
+      args:
+        NODE_ENV: ${NODE_ENV}
+    container_name: mileto-api
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      PORT: ${PORT}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    env_file:
+      - .env.docker
+    ports:
+      - "${PORT}:${PORT}"
+    networks:
+      - postgres-network
+      - redis-network
+    volumes:
+      - ./src:/app/src
+      - /app/node_modules
+
+networks:
+  postgres-network:
+    external: true
+  redis-network:
+    external: true
