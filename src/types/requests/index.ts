@@ -5,5 +5,6 @@ import { UserTokenData } from "../data/users";
 export interface AppRequest<T = any> extends Request {
     db?: DB,
     body: T;
-    user?: UserTokenData
+    user?: UserTokenData;
+    sessionId?: string;  // Current session ID (from JWT sid claim)
 }

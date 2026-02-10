@@ -1,79 +1,215 @@
 import { db } from "@/config";
 import { Pool, PoolClient } from "pg";
 import { DeleteConditionArg, InsertTableSchema, SelectConditionArg, TableName, TableSchema, UpdateConditionArg, WhereConditionArg } from "@/types/db";
+import { validateTableName } from "@/services/security";
 
+/**
+ * Database connection pool
+ * Shared across all DB instances
+ */
 const POOL = new Pool({
     user: db.user,
     host: db.host,
     database: db.database,
     password: db.password,
     port: db.port,
+    // Pool configuration
+    max: 20,                    // Maximum connections in pool
+    idleTimeoutMillis: 30000,   // Close idle connections after 30s
+    connectionTimeoutMillis: 5000, // Fail if can't connect in 5s
 });
 
+// Log pool errors
+POOL.on('error', (err) => {
+    console.error('[DB POOL] Unexpected error on idle client:', err);
+});
+
+/**
+ * Database class implementing Unit of Work pattern
+ * 
+ * Lifecycle:
+ * 1. connect() - Acquires connection from pool and starts transaction
+ * 2. ... perform database operations ...
+ * 3. commit() - Commits transaction (on success)
+ *    OR rollback() - Rolls back transaction (on error)
+ * 4. release() - Returns connection to pool (always called)
+ * 
+ * Usage with handleRequest:
+ * - Connection acquired automatically at request start
+ * - Transaction started automatically
+ * - Commit/rollback handled based on success/error
+ * - Connection released in finally block
+ */
 export default class DB {
-    private cxn: PoolClient | undefined;
-    hasTransaction: boolean = false;
+    private client: PoolClient | null = null;
+    private inTransaction: boolean = false;
+    private released: boolean = false;
 
-    setConnection = async <T>(fn: () => Promise<T>): Promise<T> => {
-        try {
-            if (!this.cxn) {
-                this.cxn = await POOL.connect();
-            }
-            return await fn.call(this);
-        } catch (error) {
-            console.error('Database operation failed:', error);
-            if (this.cxn && this.hasTransaction) {
-                console.log('SET CONNECTION ERROR ROLLBACK ON CATCH')
-                await this.cxn.query('ROLLBACK;');
-                this.hasTransaction = false;
-            }
-            throw error;
-        } finally {
-            if (this.cxn && !this.hasTransaction) {
-                this.cxn.release();
-                this.cxn = undefined;
-            }
+    /**
+     * Acquires a connection from the pool and starts a transaction
+     * Must be called before any database operations
+     */
+    async connect(): Promise<void> {
+        if (this.client) {
+            throw new Error('Connection already acquired');
         }
-    };
+        if (this.released) {
+            throw new Error('DB instance already released, create a new one');
+        }
 
-    getClient = (): PoolClient => {
-        if (!this.cxn) throw new Error("Connection not established");
-        return this.cxn;
+        this.client = await POOL.connect();
+        await this.client.query('BEGIN');
+        this.inTransaction = true;
     }
 
-    beginTransaction = async () => await this.setConnection(async () => {
-        await this.cxn!.query('BEGIN;');
-        this.hasTransaction = true;
-    })
-
-    commit = async () => await this.setConnection(async () => {
-        if (!this.hasTransaction) {
-            console.warn('No active transaction to rollback');
+    /**
+     * Commits the current transaction
+     * Should be called on successful request completion
+     */
+    async commit(): Promise<void> {
+        if (!this.client) {
+            throw new Error('No active connection');
+        }
+        if (!this.inTransaction) {
+            console.warn('[DB] No active transaction to commit');
             return;
         }
-        await this.cxn!.query('COMMIT;');
-        this.hasTransaction = false;
-    })
 
-    rollback = async () => await this.setConnection(async () => {
-        if (!this.hasTransaction) {
-            console.warn('No active transaction to rollback');
+        await this.client.query('COMMIT');
+        this.inTransaction = false;
+    }
+
+    /**
+     * Rolls back the current transaction
+     * Should be called on request error
+     */
+    async rollback(): Promise<void> {
+        if (!this.client) {
+            return; // No connection, nothing to rollback
+        }
+        if (!this.inTransaction) {
+            return; // No transaction, nothing to rollback
+        }
+
+        try {
+            await this.client.query('ROLLBACK');
+        } catch (err) {
+            console.error('[DB] Rollback failed:', err);
+        }
+        this.inTransaction = false;
+    }
+
+    /**
+     * Releases the connection back to the pool
+     * Must ALWAYS be called after request completes (in finally block)
+     */
+    release(): void {
+        if (this.released) {
+            return; // Already released
+        }
+
+        if (this.client) {
+            if (this.inTransaction) {
+                // Safety: if transaction still open, rollback before release
+                console.warn('[DB] Connection released with open transaction, rolling back');
+                this.client.query('ROLLBACK').catch(err => {
+                    console.error('[DB] Emergency rollback failed:', err);
+                });
+            }
+            this.client.release();
+            this.client = null;
+        }
+
+        this.released = true;
+        this.inTransaction = false;
+    }
+
+    /**
+     * Checks if connection is active
+     */
+    isConnected(): boolean {
+        return this.client !== null && !this.released;
+    }
+
+    /**
+     * Gets the underlying client (for advanced use)
+     * Throws if no connection
+     */
+    getClient(): PoolClient {
+        if (!this.client) {
+            throw new Error('No active connection. Call connect() first.');
+        }
+        return this.client;
+    }
+
+    /**
+     * Helper to ensure connection exists before operation
+     */
+    private ensureConnected(): void {
+        if (!this.client) {
+            throw new Error('No active connection. Call connect() first.');
+        }
+        if (this.released) {
+            throw new Error('Connection already released');
+        }
+    }
+
+    // ==================== Manual Transaction Control ====================
+    // Use these for nested savepoints or manual transaction control
+
+    /**
+     * Starts a transaction manually (if not auto-started)
+     */
+    async beginTransaction(): Promise<void> {
+        this.ensureConnected();
+        if (this.inTransaction) {
+            console.warn('[DB] Transaction already active');
             return;
         }
-        await this.cxn!.query('ROLLBACK;');
-        this.hasTransaction = false;
-    })
+        await this.client!.query('BEGIN');
+        this.inTransaction = true;
+    }
 
-    query = async <T = any>(query: string, params?: any[]): Promise<T> => await this.setConnection(async () => {
-        const result = await this.cxn!.query(query, params);
+    /**
+     * Creates a savepoint for partial rollback
+     */
+    async savepoint(name: string): Promise<void> {
+        this.ensureConnected();
+        await this.client!.query(`SAVEPOINT ${name}`);
+    }
+
+    /**
+     * Rolls back to a savepoint
+     */
+    async rollbackToSavepoint(name: string): Promise<void> {
+        this.ensureConnected();
+        await this.client!.query(`ROLLBACK TO SAVEPOINT ${name}`);
+    }
+
+    // ==================== Query Methods ====================
+
+    /**
+     * Executes a raw SQL query
+     */
+    async query<T = any>(sql: string, params?: any[]): Promise<T> {
+        this.ensureConnected();
+        const result = await this.client!.query(sql, params);
         return result.rows as T;
-    })
+    }
 
-    insert = async<T extends TableName>(
+    /**
+     * Inserts one or more rows into a table
+     */
+    async insert<T extends TableName>(
         table: T,
         valuesArray: InsertTableSchema[T][],
         options: { returning: boolean } = { returning: true }
-    ): Promise<TableSchema[T][]> => await this.setConnection(async () => {
+    ): Promise<TableSchema[T][]> {
+        this.ensureConnected();
+
+        // Security: Validate table name against whitelist
+        validateTableName(table);
+
         if (valuesArray.length === 0) {
             throw new Error('Values array cannot be empty');
         }
@@ -87,15 +223,15 @@ export default class DB {
             )
             .join(', ');
 
-        const query = `
+        const sql = `
             INSERT INTO ${table} (${insertFields.join(',')})
             VALUES ${valuePlaceholders}
             ${options?.returning ? `RETURNING *` : ''};
         `;
 
-        const result = await this.cxn!.query(query, insertValues);
+        const result = await this.client!.query(sql, insertValues);
         return options?.returning ? result.rows : [];
-    })
+    }
 
     private static createWhereStatement = (currentIndex: number, key: string, value: any) => {
         const IN = () => `${key} = ANY($${currentIndex})`
@@ -136,65 +272,113 @@ export default class DB {
         return { where: whereClause, values };
     }
 
-    find = async <T extends TableName>(
+    /**
+     * Finds rows matching the where clause
+     */
+    async find<T extends TableName>(
         table: T,
         where: WhereConditionArg<T>
-    ): Promise<TableSchema[T][]> => await this.setConnection(async () => {
+    ): Promise<TableSchema[T][]> {
+        this.ensureConnected();
 
-        const { where: whereClause, values: whereValues } = DB.getWhereClause(where)
-        const query = `
-                SELECT * FROM ${table}
-                ${whereClause};
-            `
+        // Security: Validate table name against whitelist
+        validateTableName(table);
 
-        const result = await this.cxn!.query(query, whereValues)
-        return result.rows
-    })
+        const { where: whereClause, values: whereValues } = DB.getWhereClause(where);
+        const sql = `
+            SELECT * FROM ${table}
+            ${whereClause};
+        `;
 
-    delete = async <T extends TableName>(
+        const result = await this.client!.query(sql, whereValues);
+        return result.rows;
+    }
+
+    /**
+     * Deletes rows matching the where clause
+     */
+    async delete<T extends TableName>(
         table: T,
         where: DeleteConditionArg<T>,
         options: { returning?: boolean } = { returning: false }
-    ): Promise<TableSchema[T][]> => await this.setConnection(async () => {
-        const conditionFields = Object.keys(where)
-        const conditionValues = Object.values(where)
+    ): Promise<TableSchema[T][]> {
+        this.ensureConnected();
 
-        const query = `
-                DELETE FROM ${table}
-                WHERE ${conditionFields.map((field, i) => `${field}=$${i + 1}`).join(' AND ')}
-                ${options.returning ? 'RETURNING *' : ''};
-            `
+        // Security: Validate table name against whitelist
+        validateTableName(table);
 
-        const result = await this.cxn!.query(query, conditionValues)
+        const conditionFields = Object.keys(where);
+        const conditionValues = Object.values(where);
+
+        const sql = `
+            DELETE FROM ${table}
+            WHERE ${conditionFields.map((field, i) => `${field}=$${i + 1}`).join(' AND ')}
+            ${options.returning ? 'RETURNING *' : ''};
+        `;
+
+        const result = await this.client!.query(sql, conditionValues);
         return options.returning ? result.rows : [];
-    })
+    }
 
-    update = async <T extends TableName>(
+    /**
+     * Updates rows matching the where clause
+     */
+    async update<T extends TableName>(
         table: T,
         values: Partial<TableSchema[T]>,
         where: UpdateConditionArg<T>,
         options: { returning?: boolean } = { returning: true }
-    ): Promise<TableSchema[T][]> => await this.setConnection(async () => {
+    ): Promise<TableSchema[T][]> {
+        this.ensureConnected();
+
+        // Security: Validate table name against whitelist
+        validateTableName(table);
+
         const setFields = Object.keys(values);
         const setValues = Object.values(values);
 
-        const { where: whereClause, values: whereValues } = DB.getWhereClause(where, setFields.length)
+        const { where: whereClause, values: whereValues } = DB.getWhereClause(where, setFields.length);
 
-        const query = `
+        const sql = `
             UPDATE ${table}
             SET ${setFields.map((field, i) => `${field}=$${i + 1}`).join(', ')}
             ${whereClause}
             ${options.returning ? 'RETURNING *' : ''};
         `;
 
-        const result = await this.cxn!.query(query, [...setValues, ...whereValues]);
+        const result = await this.client!.query(sql, [...setValues, ...whereValues]);
         return options.returning ? result.rows : [];
-    });
+    }
 
-    ping = async () => {
-        return await this.setConnection(async () => {
-            await this.cxn!.query('SELECT 1');
+    /**
+     * Pings the database to check connection
+     * Note: This creates its own connection for health checks
+     */
+    static async ping(): Promise<boolean> {
+        const client = await POOL.connect();
+        try {
+            await client.query('SELECT 1');
             return true;
-        });
-    };
+        } finally {
+            client.release();
+        }
+    }
+
+    /**
+     * Get pool statistics for monitoring
+     */
+    static getPoolStats() {
+        return {
+            totalCount: POOL.totalCount,
+            idleCount: POOL.idleCount,
+            waitingCount: POOL.waitingCount,
+        };
+    }
+
+    /**
+     * Graceful shutdown - close all pool connections
+     */
+    static async shutdown(): Promise<void> {
+        await POOL.end();
+    }
 }

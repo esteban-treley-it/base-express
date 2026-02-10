@@ -24,9 +24,10 @@ class RedisSingleton {
     }
 
     public static async ping(): Promise<boolean> {
-        const redis = RedisSingleton.instance;
         try {
-            await redis.ping();
+            if (!redis.url) return false;
+            const redisClient = RedisSingleton.getInstance();
+            await redisClient.ping();
             return true;
         } catch (error) {
             console.error("Redis ping failed:", error);

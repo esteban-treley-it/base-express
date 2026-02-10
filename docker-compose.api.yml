@@ -1,11 +1,11 @@
 version: '3.8'
 
 services:
-  mileto-api:
+  base-express-api:
     build:
       args:
         NODE_ENV: ${NODE_ENV}
-    container_name: mileto-api
+    container_name: base-express-api
     environment:
       NODE_ENV: ${NODE_ENV}
       PORT: ${PORT}
@@ -21,6 +21,7 @@ services:
       - redis-network
     volumes:
       - ./src:/app/src
+      - ./keys:/app/keys:ro
       - /app/node_modules
 
 networks:

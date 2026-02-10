@@ -1,17 +1,23 @@
 import { UserDB, InsertUserDB } from "./users";
 import { UserSessionDB, InsertUserSessionDB } from "./user_sessions";
 import { ErrorLogsDB, InsertErrorLogsDB } from "./error_logs";
+import { AuditLogDB, InsertAuditLogDB } from "./audit_logs";
+import { PasswordResetTokenDB, InsertPasswordResetTokenDB } from "./password_reset_tokens";
 
 export interface TableSchema {
     users: UserDB;
     user_sessions: UserSessionDB;
-    error_logs: ErrorLogsDB
+    error_logs: ErrorLogsDB;
+    audit_logs: AuditLogDB;
+    password_reset_tokens: PasswordResetTokenDB;
 }
 
 export type InsertTableSchema = {
     users: InsertUserDB;
     user_sessions: InsertUserSessionDB;
-    error_logs: InsertErrorLogsDB
+    error_logs: InsertErrorLogsDB;
+    audit_logs: InsertAuditLogDB;
+    password_reset_tokens: InsertPasswordResetTokenDB;
 }
 
 export type TableName = keyof TableSchema;

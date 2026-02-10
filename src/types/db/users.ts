@@ -6,7 +6,6 @@ export interface UserDB {
     email: string;
     password: string;
     disabled: boolean;
-    is_owner: boolean;
     created_at: string;
     updated_at: string;
 }
