@@ -1,10 +1,4 @@
-/**
- * Audit Log Types
- * 
- * For tracking security-sensitive actions
- */
-
-export type AuditAction = 
+export type AuditAction =
     | 'login_success'
     | 'login_failed'
     | 'logout'
@@ -21,11 +15,11 @@ export type AuditAction =
 export interface AuditLogDB {
     id: string;
     action: AuditAction;
-    user_id: string | null;        // null for failed logins with unknown email
-    email: string | null;          // For tracking failed login attempts
+    user_id: string | null;
+    email: string | null;
     ip_address: string | null;
     user_agent: string | null;
-    metadata: string | null;       // JSON string with additional context
+    metadata: string | null;
     created_at: string;
 }
 

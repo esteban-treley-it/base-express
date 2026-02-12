@@ -1,11 +1,12 @@
 export interface ErrorLogsDB {
-    method: string
-    route: string
-    message: string,
-    body: string
-    headers: string
-    user_data: string
-    created_at: string
+    id: string;
+    method: string;
+    route: string;
+    message: string;
+    body: string | null;
+    headers: string | null;
+    user_data: string | null;
+    created_at: string;
 }
 
-export type InsertErrorLogsDB = Omit<ErrorLogsDB, 'created_at'>;
+export type InsertErrorLogsDB = Omit<ErrorLogsDB, 'id' | 'created_at'>;

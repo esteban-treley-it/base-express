@@ -12,6 +12,8 @@
     "test": "jest --coverage=true -w=1 --forceExit --detectOpenHandles --watchAll=false --testPathPattern=src/__tests__ --testPathIgnorePatterns=build",
     "script:keys": "mkdir keys && openssl genpkey -algorithm RSA -out keys/private.pem -pkeyopt rsa_keygen_bits:2048",
     "script:adapt": "node ./scripts/adaptDocker.js",
+    "script:postman": "node ./scripts/generatePostmanCollection.js",
+    "script:db-types": "node ./scripts/generateDbTypes.js",
     "docker:services": "docker compose -f docker-compose.services.yml --env-file .env.docker up -d",
     "docker:dev": "docker compose -f docker-compose.api.yml --env-file .env.docker up",
     "docker:dev:nocache": "docker compose -f docker-compose.api.yml --env-file .env.docker build --no-cache && docker compose -f docker-compose.api.yml --env-file .env.docker up"

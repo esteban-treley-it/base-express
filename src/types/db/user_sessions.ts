@@ -2,11 +2,11 @@ export type SessionStatus = 'active' | 'revoked' | 'expired';
 
 export interface UserSessionDB {
     sid: string;
-    user_id: string;
+    user_id: string | null;
     refresh_jti: string | null;
     status: SessionStatus;
     created_at: string;
-    expires_at: string;
+    expires_at: string | null;
     last_seen_at: string | null;
     rotated_at: string | null;
     revoked_at: string | null;

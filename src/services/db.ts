@@ -1,6 +1,6 @@
 import { db } from "@/config";
-import { Pool, PoolClient } from "pg";
-import { DeleteConditionArg, InsertTableSchema, SelectConditionArg, TableName, TableSchema, UpdateConditionArg, WhereConditionArg } from "@/types/db";
+import { Pool, PoolClient, types as pgTypes } from "pg";
+import { DeleteConditionArg, InsertTableSchema, SelectConditionArg, TableColumn, TableName, TableSchema, UpdateConditionArg, WhereConditionArg } from "@/types/db";
 import { validateTableName } from "@/services/security";
 
 /**
@@ -44,6 +44,7 @@ export default class DB {
     private client: PoolClient | null = null;
     private inTransaction: boolean = false;
     private released: boolean = false;
+    private static enumArrayParsersInit: Promise<void> | null = null;
 
     /**
      * Acquires a connection from the pool and starts a transaction
@@ -58,6 +59,7 @@ export default class DB {
         }
 
         this.client = await POOL.connect();
+        await DB.ensureEnumArrayParsers(this.client);
         await this.client.query('BEGIN');
         this.inTransaction = true;
     }
@@ -154,6 +156,34 @@ export default class DB {
         }
     }
 
+    private static async ensureEnumArrayParsers(client: PoolClient): Promise<void> {
+        if (!DB.enumArrayParsersInit) {
+            DB.enumArrayParsersInit = (async () => {
+                const sql = `
+                    SELECT t.typarray
+                    FROM pg_type t
+                    WHERE t.typtype = 'e' AND t.typarray <> 0;
+                `;
+                const result = await client.query(sql);
+                const getTypeParserByOid = pgTypes.getTypeParser as unknown as (oid: number, format?: 'text' | 'binary') => any;
+                const setTypeParserByOid = pgTypes.setTypeParser as unknown as (oid: number, parser: (value: string) => any) => void;
+                const textArrayParser = getTypeParserByOid(1009, 'text');
+
+                for (const row of result.rows) {
+                    const arrayOid = Number(row.typarray);
+                    if (Number.isFinite(arrayOid) && arrayOid > 0) {
+                        setTypeParserByOid(arrayOid, textArrayParser);
+                    }
+                }
+            })().catch((err) => {
+                DB.enumArrayParsersInit = null;
+                throw err;
+            });
+        }
+
+        await DB.enumArrayParsersInit;
+    }
+
     // ==================== Manual Transaction Control ====================
     // Use these for nested savepoints or manual transaction control
 
@@ -233,15 +263,80 @@ export default class DB {
         return options?.returning ? result.rows : [];
     }
 
+    /**
+     * Inserts or updates a row based on conflict columns
+     */
+    async upsert<T extends TableName>(
+        table: T,
+        values: InsertTableSchema[T],
+        conflictColumns: TableColumn<T>[],
+        options: { returning?: boolean; updateColumns?: (TableColumn<T> | "*")[] } = { returning: true }
+    ): Promise<TableSchema[T][]> {
+        this.ensureConnected();
+
+        // Security: Validate table name against whitelist
+        validateTableName(table);
+
+        if (!conflictColumns.length) {
+            throw new Error('Conflict columns cannot be empty');
+        }
+
+        const insertFields = Object.keys(values);
+        if (insertFields.length === 0) {
+            throw new Error('Values object cannot be empty');
+        }
+
+        const insertValues = Object.values(values);
+        const valuePlaceholders = insertFields.map((_, i) => `$${i + 1}`).join(', ');
+
+        const updateColumns = options.updateColumns?.includes("*")
+            ? insertFields
+            : options.updateColumns ?? insertFields.filter(
+                (field) => !conflictColumns.includes(field as TableColumn<T>)
+            );
+
+        const conflictTarget = conflictColumns.join(', ');
+        const updateClause = updateColumns.length
+            ? `DO UPDATE SET ${updateColumns.map((col) => `${col}=EXCLUDED.${col}`).join(', ')}`
+            : 'DO NOTHING';
+
+        const sql = `
+            INSERT INTO ${table} (${insertFields.join(',')})
+            VALUES (${valuePlaceholders})
+            ON CONFLICT (${conflictTarget})
+            ${updateClause}
+            ${options?.returning ? 'RETURNING *' : ''};
+        `;
+
+        const result = await this.client!.query(sql, insertValues);
+        return options?.returning ? result.rows : [];
+    }
+
     private static createWhereStatement = (currentIndex: number, key: string, value: any) => {
         const IN = () => `${key} = ANY($${currentIndex})`
-
         const EQUALS = () => `${key}=$${currentIndex}`
+        const CONTAINS = () => `${key} @> $${currentIndex}`
+        const OVERLAPS = () => `${key} && $${currentIndex}`
+
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            if ('$contains' in value) {
+                const raw = (value as { $contains: any }).$contains;
+                const arr = Array.isArray(raw) ? raw : [raw];
+                return { clause: CONTAINS(), value: arr };
+            }
+            if ('$overlap' in value) {
+                const raw = (value as { $overlap: any }).$overlap;
+                const arr = Array.isArray(raw) ? raw : [raw];
+                return { clause: OVERLAPS(), value: arr };
+            }
+            return { clause: EQUALS(), value };
+        }
 
         if (Array.isArray(value)) {
-            return IN()
+            return { clause: IN(), value };
         }
-        return EQUALS()
+
+        return { clause: EQUALS(), value };
     }
 
     private static getWhereClause = <T extends TableName>(
@@ -255,16 +350,18 @@ export default class DB {
         for (const [key, value] of Object.entries(where)) {
             let clause: string = ''
             if (key.startsWith('$')) {
-                if (key === '$gt' || key === '$lt') {
+                if (key === '$gt' || key === '$lt' || key === '$ne') {
                     for (const [subKey, subValue] of Object.entries(value as SelectConditionArg<T>)) {
-                        clause = `${subKey} ${key === '$gt' ? '>' : '<'} $${values.length + 1}`;
+                        const operator = key === '$gt' ? '>' : key === '$lt' ? '<' : '<>';
+                        clause = `${subKey} ${operator} $${values.length + 1}`;
                         values.push(subValue);
                     }
                 }
             } else {
                 const valueIndex = startingIndex + values.length + 1
-                clause = DB.createWhereStatement(valueIndex, key, value)
-                values.push(value);
+                const statement = DB.createWhereStatement(valueIndex, key, value)
+                clause = statement.clause
+                values.push(statement.value);
             }
             whereStrings.push(clause);
         }

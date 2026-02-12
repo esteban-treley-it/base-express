@@ -1,13 +1,9 @@
-/**
- * Password Reset Token Types
- */
-
 export interface PasswordResetTokenDB {
     id: string;
     user_id: string;
-    token_hash: string;           // SHA-256 hash of the token
+    token_hash: string;
     expires_at: string;
-    used_at: string | null;       // Set when token is used
+    used_at: string | null;
     created_at: string;
 }
 

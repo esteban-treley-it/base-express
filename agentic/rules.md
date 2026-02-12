@@ -1,48 +1,50 @@
 # Project Rules
 
-> **Ver también:** `AGENTS.md` para reglas de comportamiento de agentes IA.
+> **See also:** `AGENTS.md` for AI agent behavior rules.
 
 ---
 
 ## Architecture Rules
 
-1. **Layer separation**: Respeta la arquitectura por capas (routes → controllers → services → data).
+1. **Layer separation**: Respect the layered architecture (routes → controllers → services → data).
 
-2. **TypeScript types**: Todos los tipos deben definirse en `src/types/`.
+2. **TypeScript types**: Define all types in `src/types/`.
 
-3. **Centralized configuration**: Toda configuración (timeouts, limits, URLs, secrets, feature flags) debe definirse en `src/config/index.ts`. Nunca hardcodear valores en services, controllers o routes.
-   - **Structure**: Agrupa config relacionada en exports nombrados (`app`, `db`, `tokens`, `redis`, `security`, `cors`, `rateLimit`)
-   - **Environment variables**: Solo leer env vars en config.ts
-   - **Defaults**: Proveer defaults sensatos para desarrollo local
+3. **Centralized configuration**: All configuration (timeouts, limits, URLs, secrets, feature flags) must live in `src/config/index.ts`. Never hardcode values in services, controllers, or routes.
+   - **Structure**: Group related config in named exports (`app`, `db`, `tokens`, `redis`, `security`, `cors`, `rateLimit`)
+   - **Environment variables**: Read env vars only in `config.ts`
+   - **Defaults**: Provide sensible defaults for local development
 
 ---
 
 ## Security Rules
 
-4. **Input validation required**: Todos los endpoints deben usar validación Zod vía `middlewares.schema()`.
+4. **Input validation required**: All endpoints must use Zod validation via `middlewares.schema()`.
 
-5. **No sensitive data in logs**: Passwords, tokens y PII deben redactarse antes de loguear.
+5. **No sensitive data in logs**: Passwords, tokens, and PII must be redacted before logging.
 
-6. **Timing-safe comparisons**: Usar `crypto.timingSafeEqual()` para comparaciones de secretos.
+6. **Timing-safe comparisons**: Use `crypto.timingSafeEqual()` for secret comparisons.
 
-7. **Health endpoints**: Nunca exponer credenciales de DB, hosts o detalles de configuración.
+7. **Health endpoints**: Never expose DB credentials, hosts, or configuration details.
 
-8. **Password policy**: Mínimo 12 caracteres con requisitos de complejidad (ver `schemas.ts`).
+8. **Password policy**: Minimum 12 characters with complexity requirements (see `schemas.ts`).
 
-9. **Rate limiting**: Todos los endpoints públicos deben tener rate limiting aplicado.
+9. **Rate limiting**: All public endpoints must have rate limiting applied.
 
-10. **Security headers**: Helmet middleware debe permanecer habilitado en producción.
+10. **Security headers**: Helmet middleware must remain enabled in production.
 
 ---
 
 ## Documentation Rules
 
-11. **Plans go to `/plans`**: Planes de trabajo van a `plans/[plan-name].md`.
+11. **Plans go to `/plans`**: Work plans live in `plans/[plan-name].md`.
 
-12. **New rules here**: Cuando el usuario mencione una nueva regla, agregarla a este archivo.
+12. **New rules here**: When the user mentions a new rule, add it to this file.
 
-13. **Selective updates**: No actualizar agentic en cada cambio. Ver checklist en `agentic/index.md`.
+13. **Selective updates**: Do not update agentic on every change. See checklist in `agentic/index.md`.
+
+14. **Full project review on request**: If the user explicitly asks to document and requests analyzing the entire project, it is allowed to read the full project and `/agentic` to produce documentation.
 
 ---
 
-*Nuevas reglas se agregan aquí conforme se definen.*
+*Add new rules here as they are defined.*

@@ -21,15 +21,18 @@ export type InsertTableSchema = {
 }
 
 export type TableName = keyof TableSchema;
-export type TableColumn<T extends TableName> = keyof TableSchema[T];
+export type TableColumn<T extends TableName> = Extract<keyof TableSchema[T], string>;
 
-export type SelectConditionArg<T extends TableName> = Partial<Record<TableColumn<T>, any>>;
+type ArraySearchCondition = { $contains: any | any[] } | { $overlap: any | any[] };
+
+export type SelectConditionArg<T extends TableName> = Partial<Record<TableColumn<T>, any | ArraySearchCondition>>;
 
 export type WhereConditionArg<T extends TableName> = SelectConditionArg<T> & {
     $or?: SelectConditionArg<T>[];
     $and?: SelectConditionArg<T>[];
     $gt?: SelectConditionArg<T>;
     $lt?: SelectConditionArg<T>;
+    $ne?: SelectConditionArg<T>;
 }
 
 export type UpdateConditionArg<T extends TableName> = Partial<Record<TableColumn<T>, any>>;
