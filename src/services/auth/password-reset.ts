@@ -12,14 +12,19 @@
 
 import crypto from 'crypto';
 import DB from '../db';
-import { hashPassword } from './auth';
+import { hashPassword, comparePasswords } from './auth';
 import { revokeAllUserSessions } from '@/data/user-sessions';
 import { BadRequest } from '../errors';
-import { InsertPasswordResetTokenDB } from '@/types/db/password_reset_tokens';
+import { InsertPasswordResetTokenDB, PasswordResetSource } from '@/types/db/password_reset_tokens';
+import { sendPasswordResetEmail } from '../email';
+import { logger } from '../logger';
+import { Audit, AuditContext } from '@/services/audit';
+import { app as appConfig } from '@/config';
 
 // Configuration
 const RESET_TOKEN_EXPIRY_MS = 60 * 60 * 1000; // 1 hour
 const RESET_TOKEN_BYTES = 32; // 256 bits of entropy
+const RESET_COOLDOWN_SECONDS = 60; // min time between reset emails per user
 
 /**
  * Generates a secure reset token
@@ -46,17 +51,29 @@ const hashToken = (token: string): string => {
  */
 export const createPasswordResetRequest = async (
     db: DB,
-    email: string
+    email: string,
+    source: PasswordResetSource = 'forgot'
 ): Promise<{ success: true; token?: string }> => {
     // Find user (but don't reveal if exists)
     const [user] = await db.query<{ user_id: string }[]>(
-        'SELECT user_id FROM users WHERE email = $1 AND disabled = false',
+        'SELECT id AS user_id FROM users WHERE email = $1 AND disabled = false',
         [email.toLowerCase()]
     );
 
     if (!user) {
         // Return success anyway to prevent email enumeration
-        // In production, maybe add a small random delay
+        return { success: true };
+    }
+
+    // Cooldown: without it anyone can (a) flood a victim's inbox and (b) keep invalidating the
+    // victim's still-valid reset link by requesting a new one over and over.
+    const [recent] = await db.query<{ id: string }[]>(
+        `SELECT id FROM password_reset_tokens
+         WHERE user_id = $1 AND used_at IS NULL
+           AND created_at > NOW() - make_interval(secs => $2)`,
+        [user.user_id, RESET_COOLDOWN_SECONDS]
+    );
+    if (recent) {
         return { success: true };
     }
 
@@ -74,16 +91,22 @@ export const createPasswordResetRequest = async (
     const entry: InsertPasswordResetTokenDB = {
         user_id: user.user_id,
         token_hash: hash,
+        source,
         expires_at: expiresAt,
     };
 
     await db.insert('password_reset_tokens', [entry]);
 
-    // TODO: Send email with reset link containing token
-    // For now, return token for testing (remove in production!)
-    console.log(`[PASSWORD RESET] Token generated for ${email}: ${token}`);
+    // Not awaited on purpose: waiting for the mail provider only when the account exists would make
+    // the response time reveal which emails are registered. sendEmail never throws.
+    void sendPasswordResetEmail(email.toLowerCase(), token, source).catch(() => undefined);
+    if (appConfig.isDev) {
+        logger.info('password-reset', `Token generated for ${email} (source: ${source}): ${token}`);
+    }
 
-    return { success: true, token }; // Remove token from response in production
+    // DEV ONLY (fail closed: NODE_ENV must be development/local/test): the token is returned so
+    // the flow can be exercised without an email provider. Never returned otherwise.
+    return { success: true, ...(appConfig.isDev && { token }) };
 };
 
 /**
@@ -93,13 +116,13 @@ export const createPasswordResetRequest = async (
 export const validateResetToken = async (
     db: DB,
     token: string
-): Promise<{ valid: boolean; userId?: string }> => {
+): Promise<{ valid: boolean; userId?: string; source?: PasswordResetSource }> => {
     const hash = hashToken(token);
 
-    const [record] = await db.query<{ user_id: string; expires_at: string; used_at: string | null }[]>(
-        `SELECT user_id, expires_at, used_at 
-         FROM password_reset_tokens 
-         WHERE token_hash = $1`,
+    const [record] = await db.query<{ user_id: string; source: PasswordResetSource }[]>(
+        `SELECT user_id, source
+         FROM password_reset_tokens
+         WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()`,
         [hash]
     );
 
@@ -107,17 +130,7 @@ export const validateResetToken = async (
         return { valid: false };
     }
 
-    // Check if already used
-    if (record.used_at) {
-        return { valid: false };
-    }
-
-    // Check expiration
-    if (new Date(record.expires_at) < new Date()) {
-        return { valid: false };
-    }
-
-    return { valid: true, userId: record.user_id };
+    return { valid: true, userId: record.user_id, source: record.source };
 };
 
 /**
@@ -127,40 +140,56 @@ export const validateResetToken = async (
 export const completePasswordReset = async (
     db: DB,
     token: string,
-    newPassword: string
+    newPassword: string,
+    currentPassword?: string,
+    auditCtx: Partial<AuditContext> = {}
 ): Promise<void> => {
     const hash = hashToken(token);
 
-    // Validate token
-    const validation = await validateResetToken(db, token);
-    if (!validation.valid || !validation.userId) {
+    // Consume the token in a single atomic statement. A SELECT-then-UPDATE lets two concurrent
+    // requests both see the token as unused and both succeed; here the second one blocks on the
+    // row lock, re-evaluates "used_at IS NULL" and matches nothing.
+    // If a later check fails the request throws and the transaction rolls back, un-consuming it.
+    const [record] = await db.query<{ user_id: string; source: PasswordResetSource }[]>(
+        `UPDATE password_reset_tokens
+         SET used_at = NOW()
+         WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()
+         RETURNING user_id, source`,
+        [hash]
+    );
+    if (!record) {
         throw new BadRequest('Invalid or expired reset token');
     }
+    const validation = { userId: record.user_id, source: record.source };
 
-    // Start transaction
-    await db.beginTransaction();
-
-    try {
-        // Mark token as used
-        await db.query(
-            'UPDATE password_reset_tokens SET used_at = NOW() WHERE token_hash = $1',
-            [hash]
+    // Change-password flow (MODULE_PASSWORD_CHANGE): re-verify the current password
+    // before allowing the change, even though the token already proves email access.
+    if (validation.source === 'update') {
+        if (!currentPassword) {
+            throw new BadRequest('Current password is required');
+        }
+        const [user] = await db.query<{ password: string | null }[]>(
+            'SELECT password FROM users WHERE id = $1',
+            [validation.userId]
         );
+        if (!user || !(await comparePasswords(currentPassword, user.password))) {
+            throw new BadRequest('Current password is incorrect');
+        }
+    }
 
-        // Update password
-        const hashedPassword = hashPassword(newPassword);
-        await db.query(
-            'UPDATE users SET password = $1, updated_at = NOW() WHERE user_id = $2',
-            [hashedPassword, validation.userId]
-        );
+    // Update password
+    const hashedPassword = await hashPassword(newPassword);
+    await db.query(
+        'UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2',
+        [hashedPassword, validation.userId]
+    );
 
-        // Revoke all sessions (security: force re-login everywhere)
-        await revokeAllUserSessions(db)(validation.userId, 'password_change');
+    // Revoke all sessions (security: force re-login everywhere)
+    await revokeAllUserSessions(db)(validation.userId, 'password_change');
 
-        await db.commit();
-    } catch (error) {
-        await db.rollback();
-        throw error;
+    await Audit.passwordResetComplete(db, validation.userId, auditCtx);
+    if (validation.source === 'update') {
+        await Audit.passwordChange(db, validation.userId, auditCtx);
     }
 };
 

@@ -17,6 +17,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { jwt as jwtConfig, tokens as tokenConfig, tenancy } from '@/config';
 import jwtKeys from './jwt-keys';
 import { Unauthorized, InternalServerError } from '../errors';
+import { logger } from '../logger';
 import {
     AccessTokenPayload,
     RefreshTokenPayload,
@@ -51,9 +52,8 @@ export const signToken = <T extends object>(
 
         return jwt.sign(payload, privateKey, signOptions);
     } catch (error) {
-        console.log(error);
         // Security: Never log the actual error which might contain key info
-        console.error('[JWT] Failed to sign token:', type);
+        logger.error('jwt', 'Failed to sign token:', type);
         throw new InternalServerError('Failed to generate token');
     }
 };
@@ -105,7 +105,7 @@ export const verifyToken = <T extends JwtPayload>(
         }
 
         // Security: Log for debugging but don't expose details
-        console.error('[JWT] Verification failed:', message.substring(0, 50));
+        logger.error('jwt', 'Verification failed:', message.substring(0, 50));
         throw new Unauthorized('Invalid token', 'VERIFICATION_FAILED');
     }
 };

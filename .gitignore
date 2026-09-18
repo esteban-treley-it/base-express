@@ -83,6 +83,9 @@ web_modules/
 .env.local
 .env.docker
 
+# Local override for feature module toggles (see modules.example.json)
+modules.json
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

@@ -1,7 +1,8 @@
 import { db } from "@/config";
 import { Pool, PoolClient, types as pgTypes } from "pg";
 import { DeleteConditionArg, InsertTableSchema, SelectConditionArg, TableColumn, TableName, TableSchema, UpdateConditionArg, WhereConditionArg } from "@/types/db";
-import { validateTableName } from "@/services/security";
+import { validateTableName, validateColumnName, isValidIdentifier } from "@/services/security";
+import { logger } from "@/services/logger";
 
 /**
  * Database connection pool
@@ -17,11 +18,14 @@ const POOL = new Pool({
     max: 20,                    // Maximum connections in pool
     idleTimeoutMillis: 30000,   // Close idle connections after 30s
     connectionTimeoutMillis: 5000, // Fail if can't connect in 5s
+    // Expiry timestamps are written from JS as UTC ISO strings into `timestamp` (no tz) columns and
+    // compared with NOW() in SQL; that only agrees if the session runs in UTC.
+    options: '-c timezone=UTC',
 });
 
 // Log pool errors
 POOL.on('error', (err) => {
-    console.error('[DB POOL] Unexpected error on idle client:', err);
+    logger.error('db', 'Unexpected error on idle client:', err);
 });
 
 /**
@@ -73,7 +77,7 @@ export default class DB {
             throw new Error('No active connection');
         }
         if (!this.inTransaction) {
-            console.warn('[DB] No active transaction to commit');
+            logger.warn('db', 'No active transaction to commit');
             return;
         }
 
@@ -96,7 +100,7 @@ export default class DB {
         try {
             await this.client.query('ROLLBACK');
         } catch (err) {
-            console.error('[DB] Rollback failed:', err);
+            logger.error('db', 'Rollback failed:', err);
         }
         this.inTransaction = false;
     }
@@ -113,9 +117,9 @@ export default class DB {
         if (this.client) {
             if (this.inTransaction) {
                 // Safety: if transaction still open, rollback before release
-                console.warn('[DB] Connection released with open transaction, rolling back');
+                logger.warn('db', 'Connection released with open transaction, rolling back');
                 this.client.query('ROLLBACK').catch(err => {
-                    console.error('[DB] Emergency rollback failed:', err);
+                    logger.error('db', 'Emergency rollback failed:', err);
                 });
             }
             this.client.release();
@@ -193,7 +197,7 @@ export default class DB {
     async beginTransaction(): Promise<void> {
         this.ensureConnected();
         if (this.inTransaction) {
-            console.warn('[DB] Transaction already active');
+            logger.warn('db', 'Transaction already active');
             return;
         }
         await this.client!.query('BEGIN');
@@ -205,7 +209,21 @@ export default class DB {
      */
     async savepoint(name: string): Promise<void> {
         this.ensureConnected();
+        DB.validateSavepointName(name);
         await this.client!.query(`SAVEPOINT ${name}`);
+    }
+
+    /**
+     * Releases a savepoint (keeps the work done since it was created)
+     */
+    async releaseSavepoint(name: string): Promise<void> {
+        this.ensureConnected();
+        DB.validateSavepointName(name);
+        await this.client!.query(`RELEASE SAVEPOINT ${name}`);
+    }
+
+    private static validateSavepointName(name: string): void {
+        if (!isValidIdentifier(name)) throw new Error('Invalid savepoint name');
     }
 
     /**
@@ -213,6 +231,7 @@ export default class DB {
      */
     async rollbackToSavepoint(name: string): Promise<void> {
         this.ensureConnected();
+        DB.validateSavepointName(name);
         await this.client!.query(`ROLLBACK TO SAVEPOINT ${name}`);
     }
 
@@ -245,7 +264,10 @@ export default class DB {
         }
 
         const insertFields = Object.keys(valuesArray[0]);
-        const insertValues = valuesArray.flatMap(Object.values);
+        // Security: column names go into the SQL text, so they must be plain identifiers
+        insertFields.forEach(validateColumnName);
+        // Same column order for every row (a row with a different key order would misalign values)
+        const insertValues = valuesArray.flatMap(row => insertFields.map(f => (row as Record<string, unknown>)[f]));
 
         const valuePlaceholders = valuesArray
             .map((_, rowIndex) =>
@@ -285,6 +307,10 @@ export default class DB {
         if (insertFields.length === 0) {
             throw new Error('Values object cannot be empty');
         }
+        // Security: every identifier that ends up in the SQL text must be a plain column name
+        insertFields.forEach(validateColumnName);
+        conflictColumns.forEach(c => validateColumnName(c as string));
+        options.updateColumns?.forEach(c => { if (c !== '*') validateColumnName(c as string); });
 
         const insertValues = Object.values(values);
         const valuePlaceholders = insertFields.map((_, i) => `$${i + 1}`).join(', ');
@@ -348,22 +374,26 @@ export default class DB {
         const values: any[] = [];
 
         for (const [key, value] of Object.entries(where)) {
-            let clause: string = ''
             if (key.startsWith('$')) {
-                if (key === '$gt' || key === '$lt' || key === '$ne') {
-                    for (const [subKey, subValue] of Object.entries(value as SelectConditionArg<T>)) {
-                        const operator = key === '$gt' ? '>' : key === '$lt' ? '<' : '<>';
-                        clause = `${subKey} ${operator} $${values.length + 1}`;
-                        values.push(subValue);
-                    }
+                if (key !== '$gt' && key !== '$lt' && key !== '$ne') {
+                    throw new Error(`Unsupported where operator: ${key}`);
+                }
+                const operator = key === '$gt' ? '>' : key === '$lt' ? '<' : '<>';
+                for (const [subKey, subValue] of Object.entries(value as SelectConditionArg<T>)) {
+                    validateColumnName(subKey);
+                    whereStrings.push(`${subKey} ${operator} $${startingIndex + values.length + 1}`);
+                    values.push(subValue);
                 }
             } else {
+                validateColumnName(key);
                 const valueIndex = startingIndex + values.length + 1
                 const statement = DB.createWhereStatement(valueIndex, key, value)
-                clause = statement.clause
+                whereStrings.push(statement.clause);
                 values.push(statement.value);
             }
-            whereStrings.push(clause);
+        }
+        if (whereStrings.length === 0) {
+            throw new Error('Where condition cannot be empty');
         }
         whereClause += whereStrings.join(' AND ');
         return { where: whereClause, values };
@@ -406,6 +436,10 @@ export default class DB {
 
         const conditionFields = Object.keys(where);
         const conditionValues = Object.values(where);
+        if (conditionFields.length === 0) {
+            throw new Error('Where condition cannot be empty');
+        }
+        conditionFields.forEach(validateColumnName);
 
         const sql = `
             DELETE FROM ${table}
@@ -433,6 +467,10 @@ export default class DB {
 
         const setFields = Object.keys(values);
         const setValues = Object.values(values);
+        if (setFields.length === 0) {
+            throw new Error('Values object cannot be empty');
+        }
+        setFields.forEach(validateColumnName);
 
         const { where: whereClause, values: whereValues } = DB.getWhereClause(where, setFields.length);
 
@@ -445,6 +483,15 @@ export default class DB {
 
         const result = await this.client!.query(sql, [...setValues, ...whereValues]);
         return options.returning ? result.rows : [];
+    }
+
+    /**
+     * Runs a single parameterized query on the shared pool, outside any request transaction.
+     * For read-only checks that run before handleRequest opens its transaction (e.g. auth middleware).
+     */
+    static async queryOnce<T = any>(sql: string, params?: any[]): Promise<T> {
+        const result = await POOL.query(sql, params);
+        return result.rows as T;
     }
 
     /**

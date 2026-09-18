@@ -12,6 +12,7 @@
 
 import DB from '@/services/db';
 import { AuditAction, InsertAuditLogDB } from '@/types/db/audit_logs';
+import { logger } from '@/services/logger';
 
 export interface AuditContext {
     userId?: string;
@@ -32,9 +33,15 @@ export interface AuditContext {
  */
 export class Audit {
     /**
-     * Core logging method - fails silently to not disrupt main flow
+     * Core logging method - fails silently to not disrupt main flow.
+     *
+     * The insert runs inside a SAVEPOINT: if it fails (constraint, bad value...) Postgres would
+     * otherwise mark the whole request transaction as aborted, and the request's COMMIT would
+     * silently turn into a ROLLBACK. Callers must `await` these methods so the savepoint
+     * statements can't interleave with the handler's own queries.
      */
     private static async log(db: DB, action: AuditAction, context: AuditContext): Promise<void> {
+        const savepoint = 'audit_log';
         try {
             const entry: InsertAuditLogDB = {
                 action,
@@ -45,9 +52,16 @@ export class Audit {
                 metadata: context.metadata ? JSON.stringify(context.metadata) : null,
             };
 
+            await db.savepoint(savepoint);
             await db.insert('audit_logs', [entry]);
+            await db.releaseSavepoint(savepoint);
         } catch (error) {
-            console.error('[AUDIT] Failed to log event:', action, error);
+            logger.error('audit', 'Failed to log event:', action, error);
+            try {
+                await db.rollbackToSavepoint(savepoint);
+            } catch {
+                // no usable transaction/connection - nothing to recover
+            }
         }
     }
 
@@ -123,6 +137,20 @@ export class Audit {
         return Audit.log(db, 'account_unlocked', { ...ctx, email });
     }
 
+    // ==================== Identity Events ====================
+
+    static emailVerified(db: DB, userId: string, ctx: Partial<AuditContext> = {}): Promise<void> {
+        return Audit.log(db, 'email_verified', { ...ctx, userId });
+    }
+
+    static providerConnected(db: DB, userId: string, provider: string, ctx: Partial<AuditContext> = {}): Promise<void> {
+        return Audit.log(db, 'provider_connected', {
+            ...ctx,
+            userId,
+            metadata: { provider, ...ctx.metadata }
+        });
+    }
+
     // ==================== Static Helpers ====================
 
     /**
@@ -130,12 +158,11 @@ export class Audit {
      */
     static getContextFromRequest(req: {
         headers: Record<string, string | string[] | undefined>;
-        socket?: { remoteAddress?: string };
+        ip?: string;
         user?: { user_id?: string; email?: string };
     }): Partial<AuditContext> {
-        const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
-            || req.socket?.remoteAddress
-            || undefined;
+        // req.ip honors the configured trust proxy hops; never read X-Forwarded-For directly
+        const ip = req.ip || undefined;
 
         const userAgent = req.headers['user-agent'] as string | undefined;
 

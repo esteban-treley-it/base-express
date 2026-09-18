@@ -10,6 +10,7 @@ const TABLE_TYPE_NAME = {
     error_logs: 'ErrorLogsDB',
     audit_logs: 'AuditLogDB',
     password_reset_tokens: 'PasswordResetTokenDB',
+    user_identities: 'UserIdentityDB',
     user_profile: 'UserProfileDB',
     templates: 'TemplateDB',
     portafolios: 'PortafolioDB',
@@ -17,14 +18,21 @@ const TABLE_TYPE_NAME = {
 
 const INSERT_PICK = {
     user_sessions: ['sid', 'user_id', 'refresh_jti', 'expires_at'],
+    user_identities: ['user_id', 'provider', 'provider_user_id', 'email'],
 };
 
 const INSERT_OMIT_EXTRA = {
     password_reset_tokens: ['used_at'],
+    users: ['email_verified_at', 'email_verification_token', 'email_verification_sent_at'],
+};
+
+const COLUMN_TYPE_OVERRIDES = {
+    password_reset_tokens: { source: 'PasswordResetSource' },
 };
 
 const EXTRA_TYPES_BY_TABLE = {
     user_sessions: "export type RevokeReason = 'logout' | 'token_reuse' | 'admin_action' | 'password_change';",
+    password_reset_tokens: "export type PasswordResetSource = 'forgot' | 'update';",
 };
 
 const DEFAULT_OMIT = ['id', 'created_at', 'updated_at'];
@@ -35,6 +43,7 @@ const TABLE_ORDER = [
     'error_logs',
     'audit_logs',
     'password_reset_tokens',
+    'user_identities',
     'user_profile',
     'templates',
     'portafolios',
@@ -229,7 +238,8 @@ const generateTableFile = (table, enums) => {
 
     lines.push(`export interface ${interfaceName} {`);
     for (const column of table.columns) {
-        const tsType = mapTypeToTs(column.typeName, enums);
+        const override = (COLUMN_TYPE_OVERRIDES[tableName] || {})[column.name];
+        const tsType = override || mapTypeToTs(column.typeName, enums);
         const typeWithNull = column.nullable ? `${tsType} | null` : tsType;
         lines.push(`    ${column.name}: ${typeWithNull};`);
     }
@@ -291,15 +301,18 @@ const generateIndexFile = (tables) => {
     lines.push('}');
     lines.push('');
     lines.push('export type TableName = keyof TableSchema;');
-    lines.push('export type TableColumn<T extends TableName> = keyof TableSchema[T];');
+    lines.push('export type TableColumn<T extends TableName> = Extract<keyof TableSchema[T], string>;');
     lines.push('');
-    lines.push('export type SelectConditionArg<T extends TableName> = Partial<Record<TableColumn<T>, any>>;');
+    lines.push('type ArraySearchCondition = { $contains: any | any[] } | { $overlap: any | any[] };');
+    lines.push('');
+    lines.push('export type SelectConditionArg<T extends TableName> = Partial<Record<TableColumn<T>, any | ArraySearchCondition>>;');
     lines.push('');
     lines.push('export type WhereConditionArg<T extends TableName> = SelectConditionArg<T> & {');
     lines.push('    $or?: SelectConditionArg<T>[];');
     lines.push('    $and?: SelectConditionArg<T>[];');
     lines.push('    $gt?: SelectConditionArg<T>;');
     lines.push('    $lt?: SelectConditionArg<T>;');
+    lines.push('    $ne?: SelectConditionArg<T>;');
     lines.push('}');
     lines.push('');
     lines.push('export type UpdateConditionArg<T extends TableName> = Partial<Record<TableColumn<T>, any>>;');

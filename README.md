@@ -16,3 +16,14 @@
 1. Create DB locally
 2. npm install 
 3. npm run dev
+
+## Database migrations
+
+Fresh databases are built from `sql/index.sql` + `sql/indexes.sql`. To bring an **existing** database up to date, add numbered files to `sql/migrations/` (`NNN_description.sql`, idempotent, never edited once applied) and run:
+
+```bash
+npm run migrate
+```
+
+It applies pending files in order, one transaction each, and records them in `schema_migrations`. It is forward-only (no rollback) and reads the same `POSTGRES_*` variables as the app. Run it against the right database: it loads `.env` from the current directory.
+

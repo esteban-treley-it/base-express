@@ -2,15 +2,16 @@ import { NextFunction, Response } from "express"
 import z from "zod";
 
 import DB from "./db";
-import { BadRequest, errorHandler } from "./errors";
+import { BadRequest, BaseError, errorHandler } from "./errors";
 import { authMiddleware, AuthenticatedRequest } from "./auth";
 import { app as appConfig } from "@/config";
+import { logger } from "./logger";
 
 import type { AppRequest } from "@/types/requests"
 
 const debugLog = (label: string, req: AppRequest) => {
     if (!appConfig.debug) return;
-    console.log(`[debug:${label}] ${req.method} ${req.originalUrl}`);
+    logger.debug('request', `${label} ${req.method} ${req.originalUrl}`);
 };
 
 /**
@@ -30,7 +31,7 @@ const requestTraceMiddleware = async (req: AppRequest, _res: Response, next: Nex
  * 1. Creates DB instance and connects (acquires connection + starts transaction)
  * 2. Executes the handler
  * 3. On success: commits transaction
- * 4. On error: rolls back transaction
+ * 4. On error: rolls back transaction (unless the error was flagged with .persist())
  * 5. Always: releases connection back to pool
  */
 export const handleRequest = (fn: Function) => async (req: AppRequest, res: Response, next: NextFunction) => {
@@ -57,8 +58,18 @@ export const handleRequest = (fn: Function) => async (req: AppRequest, res: Resp
             res.status(204).json({ success: true });
         }
     } catch (error) {
-        // Error: rollback transaction
-        await db.rollback();
+        if (error instanceof BaseError && error.commitOnError) {
+            // The handler flagged its writes as ones that must survive the failure
+            // (audit rows, session revocation on token reuse): keep them.
+            try {
+                await db.commit();
+            } catch {
+                await db.rollback();
+            }
+        } else {
+            // Error: rollback transaction
+            await db.rollback();
+        }
         errorHandler(req, res, next)(error);
     } finally {
         // Always: release connection back to pool
@@ -74,6 +85,9 @@ const schemaMiddleware = (schema: z.AnyZodObject) => async (req: AppRequest, res
         if (!validation.success)
             return errorHandler(req, res, next)(new BadRequest("Invalid request body", validation.error.errors.map(e => ({ key: e.path.join("."), message: e.message }))));
 
+        // Security: replace the raw body with the parsed data so keys not declared in the
+        // schema (zod strips them) never reach controllers or the DB layer.
+        req.body = validation.data;
         next();
     } catch (error) {
         next(error);

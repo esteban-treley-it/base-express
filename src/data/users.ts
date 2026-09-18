@@ -4,17 +4,23 @@ import { auth as authConfig } from "@/config";
 
 export type UserDataWithPassword = UserTokenData & { password: string };
 
+// A user can belong to several orgs and the LEFT JOIN returns one row per membership.
+// Without an ORDER BY the row (and therefore the org/role put in the token) was arbitrary.
+// Pick the oldest membership, deterministically.
+const orderOrg = authConfig.multiTenant ? 'ORDER BY ou.created_at ASC NULLS LAST, ou.id LIMIT 1' : '';
+
 /**
  * Gets user by email
  */
 export const getUserByEmail = (db: DB) => async (email: string, withPassword: boolean = true): Promise<UserTokenData | UserDataWithPassword | null> => {
     // Build query based on multi-tenant mode
     const baseSelect = `
-        SELECT 
-            u.id as user_id, 
-            CONCAT(u.name, ' ', u.lastname) as name, 
-            u.email, 
-            u.password`;
+        SELECT
+            u.id as user_id,
+            CONCAT(u.name, ' ', u.lastname) as name,
+            u.email,
+            u.password,
+            u.email_verified_at`;
 
     const orgSelect = authConfig.multiTenant ? `,
             o.id as org_id,
@@ -28,9 +34,10 @@ export const getUserByEmail = (db: DB) => async (email: string, withPassword: bo
 
     const query = `${baseSelect}${orgSelect}
         FROM users u${orgJoin}
-        WHERE u.email = $1 AND u.disabled = false;`;
+        WHERE u.email = $1 AND u.disabled = false
+        ${orderOrg};`;
 
-    const userData = await db!.query(query, [email]);
+    const userData = await db!.query(query, [email.toLowerCase()]);
 
     if (userData.length === 0) {
         return null;
@@ -48,6 +55,7 @@ export const getUserByEmail = (db: DB) => async (email: string, withPassword: bo
         user_id: user.user_id,
         name: user.name,
         email: user.email,
+        email_verified_at: user.email_verified_at,
         ...(org && { org })
     } as UserTokenData;
 
@@ -56,6 +64,7 @@ export const getUserByEmail = (db: DB) => async (email: string, withPassword: bo
         name: user.name,
         email: user.email,
         password: user.password,
+        email_verified_at: user.email_verified_at,
         ...(org && { org })
     } as UserDataWithPassword;
 }
@@ -83,7 +92,8 @@ export const getUserById = (db: DB) => async (userId: string): Promise<UserToken
 
     const query = `${baseSelect}${orgSelect}
         FROM users u${orgJoin}
-        WHERE u.id = $1 AND u.disabled = false;`;
+        WHERE u.id = $1 AND u.disabled = false
+        ${orderOrg};`;
 
     const userData = await db!.query(query, [userId]);
 

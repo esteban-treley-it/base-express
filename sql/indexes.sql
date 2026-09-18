@@ -23,5 +23,16 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_email ON audit_logs(email) WHERE email
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_hash ON password_reset_tokens(token_hash) WHERE used_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id ON password_reset_tokens(user_id);
 
+-- user_identities (Optional: MODULE_GOOGLE_AUTH=true)
+CREATE INDEX IF NOT EXISTS idx_user_identities_user_id ON user_identities(user_id);
+
+-- users (Optional: MODULE_EMAIL_VERIFICATION=true)
+CREATE INDEX IF NOT EXISTS idx_users_email_verification_token ON users(email_verification_token) WHERE email_verification_token IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_status_expires ON user_sessions(status, expires_at);
+
+-- users: emails are stored lowercase (the API normalizes them) and must be unique case-insensitively.
+-- If this fails on an existing database there are duplicate emails that differ only by case:
+-- merge or rename them first, then run:  UPDATE users SET email = lower(email);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower ON users (lower(email));

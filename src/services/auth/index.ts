@@ -73,3 +73,16 @@ export {
     completePasswordReset,
     cleanupExpiredTokens,
 } from './password-reset';
+
+// Email verification (Optional: MODULE_EMAIL_VERIFICATION=true)
+export {
+    initiateEmailVerification,
+    completeEmailVerification,
+} from './email-verification';
+
+// Google Sign-In (Optional: MODULE_GOOGLE_AUTH=true)
+export {
+    verifyGoogleIdToken,
+    isGoogleSignInEnabled,
+    GoogleIdentity,
+} from './google';

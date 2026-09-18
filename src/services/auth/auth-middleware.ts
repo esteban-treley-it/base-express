@@ -1,17 +1,20 @@
 /**
  * Auth Middleware
- * 
+ *
  * Express middleware for JWT authentication.
  * Supports both cookie-based and Bearer token auth.
+ *
+ * Security: a valid signature is not enough. Every authenticated request also checks that the
+ * session is still active (not revoked/expired) and the user is not disabled, so logout,
+ * refresh-token-reuse revocation, password changes and account disabling take effect
+ * immediately instead of after the access token expires. It's one indexed primary-key lookup.
  */
 
 import { Request, Response, NextFunction } from 'express';
-import { getActiveSession } from '@/data/user-sessions';
-import { tokens as tokenConfig, auth as authConfig } from '@/config';
+import DB from '@/services/db';
+import { tokens as tokenConfig } from '@/config';
 import { Unauthorized } from '../errors';
-import { AuthCache } from './auth-cache';
 import { verifyAccessToken } from './jwt';
-import { AccessTokenPayload } from '@/types/auth';
 import { UserSessionDB } from '@/types/db/user_sessions';
 
 /**
@@ -32,7 +35,6 @@ export interface AuthenticatedRequest extends Request {
  * Options for auth middleware
  */
 export interface AuthMiddlewareOptions {
-    loadSession?: boolean;  // Whether to load full session from DB
     requireOrg?: boolean;   // Require organization membership
 }
 
@@ -40,7 +42,7 @@ export interface AuthMiddlewareOptions {
  * Gets the access token from request
  * Prefers Authorization header, falls back to cookie
  */
-const getAccessToken = (req: Request): string | null => {
+export const getAccessToken = (req: Request): string | null => {
     // Check Authorization header first
     const authHeader = req.headers.authorization;
     if (authHeader?.startsWith('Bearer ')) {
@@ -49,6 +51,39 @@ const getAccessToken = (req: Request): string | null => {
 
     // Fall back to cookie
     return req.cookies?.[tokenConfig.names.access] || null;
+};
+
+/**
+ * Verifies the access token AND that its session is still live. Throws Unauthorized otherwise.
+ */
+const resolveAuthContext = async (token: string): Promise<AuthenticatedRequest['auth']> => {
+    let payload;
+    try {
+        payload = verifyAccessToken(token);
+    } catch {
+        throw new Unauthorized('Invalid or expired token');
+    }
+
+    const [live] = await DB.queryOnce<{ sid: string }[]>(
+        `SELECT s.sid
+         FROM user_sessions s
+         JOIN users u ON u.id = s.user_id
+         WHERE s.sid = $1 AND s.user_id = $2
+           AND s.status = 'active' AND s.expires_at > NOW()
+           AND u.disabled = false`,
+        [payload.sid, payload.sub]
+    );
+    if (!live) {
+        throw new Unauthorized('Session not found or revoked', 'SESSION_REVOKED');
+    }
+
+    return {
+        userId: payload.sub,
+        email: payload.email,
+        sid: payload.sid,
+        orgId: payload.org_id,
+        role: payload.role,
+    };
 };
 
 /**
@@ -68,41 +103,7 @@ export const authMiddleware = (options: AuthMiddlewareOptions = {}) => {
                 throw new Unauthorized('No access token provided');
             }
 
-            // Check blacklist first (fast rejection for revoked tokens)
-            const cache = AuthCache.getInstance();
-            const isBlacklisted = await cache.isBlacklisted(token);
-            if (isBlacklisted) {
-                throw new Unauthorized('Token has been revoked', 'TOKEN_REVOKED');
-            }
-
-            // Verify and decode the token
-            let payload: AccessTokenPayload;
-            try {
-                payload = verifyAccessToken(token);
-            } catch {
-                throw new Unauthorized('Invalid or expired token');
-            }
-
-            // Build auth context
-            const authContext: AuthenticatedRequest['auth'] = {
-                userId: payload.sub,
-                email: payload.email,
-                sid: payload.sid,
-                orgId: payload.org_id,
-                role: payload.role,
-            };
-
-            // Optionally load full session from DB
-            if (options.loadSession) {
-                const db = req.app.locals.db;
-                const session = await getActiveSession(db)(payload.sid);
-
-                if (!session || session.status === 'revoked') {
-                    throw new Unauthorized('Session not found or revoked');
-                }
-
-                authContext.session = session;
-            }
+            const authContext = await resolveAuthContext(token);
 
             // Check org requirement
             if (options.requireOrg && !authContext.orgId) {
@@ -121,7 +122,7 @@ export const authMiddleware = (options: AuthMiddlewareOptions = {}) => {
 
 /**
  * Optional auth middleware
- * Attaches auth context if token is present, but doesn't require it
+ * Attaches auth context if token is present and valid, but doesn't require it
  */
 export const optionalAuthMiddleware = () => {
     return async (
@@ -131,27 +132,13 @@ export const optionalAuthMiddleware = () => {
     ): Promise<void> => {
         try {
             const token = getAccessToken(req);
-
             if (token) {
-                const cache = AuthCache.getInstance();
-                const isBlacklisted = await cache.isBlacklisted(token);
-
-                if (!isBlacklisted) {
-                    try {
-                        const payload = verifyAccessToken(token);
-                        (req as AuthenticatedRequest).auth = {
-                            userId: payload.sub,
-                            email: payload.email,
-                            sid: payload.sid,
-                            orgId: payload.org_id,
-                            role: payload.role,
-                        };
-                    } catch {
-                        // Token invalid, continue without auth
-                    }
+                try {
+                    (req as AuthenticatedRequest).auth = await resolveAuthContext(token);
+                } catch {
+                    // Invalid/revoked token, continue without auth
                 }
             }
-
             next();
         } catch {
             next();

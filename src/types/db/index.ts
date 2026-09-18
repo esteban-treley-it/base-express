@@ -3,6 +3,9 @@ import { UserSessionDB, InsertUserSessionDB } from "./user_sessions";
 import { ErrorLogsDB, InsertErrorLogsDB } from "./error_logs";
 import { AuditLogDB, InsertAuditLogDB } from "./audit_logs";
 import { PasswordResetTokenDB, InsertPasswordResetTokenDB } from "./password_reset_tokens";
+import { UserIdentityDB, InsertUserIdentityDB } from "./user_identities";
+import { OrgsDB, InsertOrgsDB } from "./orgs";
+import { OrgUsersDB, InsertOrgUsersDB } from "./org_users";
 
 export interface TableSchema {
     users: UserDB;
@@ -10,6 +13,9 @@ export interface TableSchema {
     error_logs: ErrorLogsDB;
     audit_logs: AuditLogDB;
     password_reset_tokens: PasswordResetTokenDB;
+    user_identities: UserIdentityDB;
+    orgs: OrgsDB;
+    org_users: OrgUsersDB;
 }
 
 export type InsertTableSchema = {
@@ -18,6 +24,9 @@ export type InsertTableSchema = {
     error_logs: InsertErrorLogsDB;
     audit_logs: InsertAuditLogDB;
     password_reset_tokens: InsertPasswordResetTokenDB;
+    user_identities: InsertUserIdentityDB;
+    orgs: InsertOrgsDB;
+    org_users: InsertOrgUsersDB;
 }
 
 export type TableName = keyof TableSchema;

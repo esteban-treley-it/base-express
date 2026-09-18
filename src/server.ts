@@ -2,22 +2,24 @@ import express from 'express'
 import corsMiddleware from 'cors'
 import helmet from 'helmet'
 import cookieParser from 'cookie-parser'
-import rateLimitMiddleware from 'express-rate-limit'
 
-import { app as appConfig, cors as corsConfig, rateLimit as rateLimitConfig } from './config'
+import { app as appConfig, cors as corsConfig } from './config'
 import router from './routes'
 import { middlewares } from './services/request'
 import { httpsEnforcement, hstsMiddleware } from './services/security'
+import { generalLimiter, authLimiter, refreshLimiter } from './services/rate-limit'
 import { startCleanupScheduler } from './services/cleanup'
+import { logger } from './services/logger'
 
 const app = express()
 
 // Global request trace middleware (runs first)
 app.use(middlewares.requestTrace)
 
-// Security: Trust proxy (for X-Forwarded-Proto behind load balancer)
-if (process.env.NODE_ENV === 'production') {
-    app.set('trust proxy', 1);
+// Security: Trust proxy - the ONLY place client IP / protocol forwarding headers are trusted.
+// Everything else must use req.ip / req.protocol instead of reading X-Forwarded-* directly.
+if (appConfig.trustProxyHops > 0) {
+    app.set('trust proxy', appConfig.trustProxyHops);
 }
 
 // Security: HTTPS enforcement in production
@@ -85,24 +87,13 @@ app.use(corsMiddleware({
 app.use(cookieParser())
 
 // Security: Rate limiting - general API protection
-const generalLimiter = rateLimitMiddleware({
-    windowMs: rateLimitConfig.general.windowMs,
-    max: rateLimitConfig.general.max,
-    message: rateLimitConfig.general.message,
-    standardHeaders: true,
-    legacyHeaders: false,
-})
 app.use(generalLimiter)
 
 // Security: Strict rate limiting for auth endpoints
-const authLimiter = rateLimitMiddleware({
-    windowMs: rateLimitConfig.auth.windowMs,
-    max: rateLimitConfig.auth.max,
-    message: rateLimitConfig.auth.message,
-    standardHeaders: true,
-    legacyHeaders: false,
-})
 app.use('/api/v1/auth', authLimiter)
+
+// Security: Dedicated (looser) rate limiting for the refresh endpoint
+app.use('/api/v1/auth/refresh', refreshLimiter)
 
 app.use(express.json({ limit: appConfig.bodyLimit }))
 app.use(express.urlencoded({ extended: true, limit: appConfig.bodyLimit }))
@@ -117,7 +108,7 @@ app.use((err: any, req: any, res: any, next: any) => {
 })
 
 app.listen(appConfig.port, () => {
-    console.log('Server is running on port', appConfig.port)
+    logger.info('server', 'Server is running on port', appConfig.port)
 
     // Start scheduled cleanup job (runs daily at 3:00 AM)
     startCleanupScheduler()
