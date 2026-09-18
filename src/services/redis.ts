@@ -1,6 +1,7 @@
 import { redis } from '@/config';
 import Redis from 'ioredis';
 import { ServiceUnavailable } from './errors';
+import { logger } from './logger';
 
 class RedisSingleton {
     private static instance: Redis;
@@ -13,11 +14,11 @@ class RedisSingleton {
             RedisSingleton.instance = new Redis(redis.url);
 
             RedisSingleton.instance.on('error', (err) => {
-                console.error('Redis connection error:', err);
+                logger.error('redis', 'Connection error:', err);
             });
 
             RedisSingleton.instance.on('connect', () => {
-                console.log('Connected to Redis');
+                logger.info('redis', 'Connected to Redis');
             });
         }
         return RedisSingleton.instance;
@@ -30,7 +31,7 @@ class RedisSingleton {
             await redisClient.ping();
             return true;
         } catch (error) {
-            console.error("Redis ping failed:", error);
+            logger.error('redis', 'Ping failed:', error);
             return false
         }
     }

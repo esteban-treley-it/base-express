@@ -11,6 +11,8 @@ export {
     checkLockout,
     clearLockout,
     validateTableName,
+    validateColumnName,
+    isValidIdentifier,
     isValidTableName,
     ALLOWED_TABLES,
     LockoutStatus,

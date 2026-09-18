@@ -37,6 +37,7 @@ En el dashboard de Railway, ve a tu servicio → Variables y agrega:
 | `JWT_PRIVATE_KEY_BASE64` | Private key en base64 (del paso 2) |
 | `NODE_ENV` | `production` |
 | `PORT` | `8000` (o el que uses) |
+| `TRUST_PROXY_HOPS` | Nº de proxies confiables delante de la app (default `1` en producción). Debe coincidir con la topología real: si es mayor, un cliente puede falsear su IP con `X-Forwarded-For`; si es menor, todos los usuarios compartirán la IP del proxy |
 | `POSTGRES_HOST` | Host de tu DB PostgreSQL |
 | `POSTGRES_USER` | Usuario de PostgreSQL |
 | `POSTGRES_PASSWORD` | Password de PostgreSQL |

@@ -2,8 +2,8 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 create type user_role as enum (
     'admin',
-    'member',
-)
+    'member'
+);
 
 CREATE TABLE users (
 	id UUID primary key default uuid_generate_v4(),
@@ -14,7 +14,11 @@ CREATE TABLE users (
 	password VARCHAR(255),
 	disabled BOOLEAN default false,
 	created_at TIMESTAMP DEFAULT NOW(),
-	updated_at TIMESTAMP default NOW()
+	updated_at TIMESTAMP default NOW(),
+	-- Optional: MODULE_EMAIL_VERIFICATION=true
+	email_verified_at TIMESTAMP,
+	email_verification_token VARCHAR(64),
+	email_verification_sent_at TIMESTAMP
 );
 
 -- Session status enum for tracking session lifecycle
@@ -57,6 +61,24 @@ CREATE TABLE org_users (
 );
 
 -- ============================================
+-- GOOGLE SIGN-IN (Optional: MODULE_GOOGLE_AUTH=true)
+-- ============================================
+
+CREATE TYPE auth_provider AS ENUM ('password', 'google');
+
+CREATE TABLE user_identities (
+    id                  UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id             UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider            auth_provider NOT NULL,
+    provider_user_id    VARCHAR(255) NOT NULL,          -- Provider subject (sub); stable across email changes
+    email               VARCHAR(254),
+    created_at          TIMESTAMP   NOT NULL DEFAULT NOW(),
+    last_login_at       TIMESTAMP,
+    CONSTRAINT uq_user_identities_provider_subject UNIQUE (provider, provider_user_id),
+    CONSTRAINT uq_user_identities_user_provider UNIQUE (user_id, provider)
+);
+
+-- ============================================
 -- ERROR LOGGING
 -- ============================================
 
@@ -87,7 +109,9 @@ CREATE TYPE audit_action AS ENUM (
     'token_refresh',
     'token_reuse_detected',
     'account_locked',
-    'account_unlocked'
+    'account_unlocked',
+    'email_verified',
+    'provider_connected'
 );
 
 CREATE TABLE audit_logs (
@@ -109,6 +133,8 @@ CREATE TABLE password_reset_tokens (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     token_hash VARCHAR(64) NOT NULL,       -- SHA-256 hash of token
+    -- 'forgot' = public forgot-password flow; 'update' = authenticated change-password flow (Optional: MODULE_PASSWORD_CHANGE=true)
+    source VARCHAR(10) NOT NULL DEFAULT 'forgot' CHECK (source IN ('forgot', 'update')),
     expires_at TIMESTAMP NOT NULL,
     used_at TIMESTAMP,                     -- Set when token is used
     created_at TIMESTAMP DEFAULT NOW()

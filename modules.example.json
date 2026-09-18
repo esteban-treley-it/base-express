@@ -1,0 +1,6 @@
+{
+    "emailVerification": false,
+    "googleAuth": false,
+    "passwordChange": false,
+    "redisRateLimit": false
+}

@@ -14,6 +14,8 @@
 
 import cron, { ScheduledTask } from 'node-cron';
 import DB from './db';
+import { logger } from './logger';
+import { cleanupExpiredSessions } from '@/data/user-sessions';
 
 // Retention configuration (in days)
 const RETENTION = {
@@ -38,6 +40,10 @@ export async function runCleanup(): Promise<{
     
     try {
         await db.connect();
+
+        // Mark sessions past their absolute lifetime as expired (they can no longer be refreshed
+        // anyway; this lets the retention delete below remove them)
+        await cleanupExpiredSessions(db)();
 
         // Delete old error logs
         const errorLogsResult = await db.query<{ count: string }[]>(`
@@ -109,13 +115,13 @@ export async function runCleanup(): Promise<{
 
         const total = Object.values(stats).reduce((a, b) => a + b, 0);
         if (total > 0) {
-            console.log('[CLEANUP] Deleted records:', stats);
+            logger.info('cleanup', 'Deleted records:', stats);
         }
 
         return stats;
     } catch (error) {
         await db.rollback();
-        console.error('[CLEANUP] Failed:', error);
+        logger.error('cleanup', 'Failed:', error);
         throw error;
     } finally {
         db.release();
@@ -127,10 +133,10 @@ export async function runCleanup(): Promise<{
  * Default: runs daily at 3:00 AM
  */
 export function startCleanupScheduler(schedule: string = '0 3 * * *'): ScheduledTask {
-    console.log(`[CLEANUP] Scheduler started with schedule: ${schedule}`);
+    logger.info('cleanup', `Scheduler started with schedule: ${schedule}`);
 
     const task = cron.schedule(schedule, async () => {
-        console.log('[CLEANUP] Running scheduled cleanup...');
+        logger.info('cleanup', 'Running scheduled cleanup...');
         try {
             await runCleanup();
         } catch (error) {
@@ -146,7 +152,7 @@ export function startCleanupScheduler(schedule: string = '0 3 * * *'): Scheduled
  */
 export function stopCleanupScheduler(task: ScheduledTask): void {
     task.stop();
-    console.log('[CLEANUP] Scheduler stopped');
+    logger.info('cleanup', 'Scheduler stopped');
 }
 
 export default {

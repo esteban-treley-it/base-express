@@ -10,7 +10,9 @@ export type AuditAction =
     | 'token_refresh'
     | 'token_reuse_detected'
     | 'account_locked'
-    | 'account_unlocked';
+    | 'account_unlocked'
+    | 'email_verified'
+    | 'provider_connected';
 
 export interface AuditLogDB {
     id: string;

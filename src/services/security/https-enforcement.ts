@@ -6,22 +6,21 @@
  */
 
 import { Request, Response, NextFunction } from 'express';
+import { app as appConfig } from '@/config';
 
 /**
  * Middleware that enforces HTTPS in production
  * Checks X-Forwarded-Proto for reverse proxy scenarios
  */
 export const httpsEnforcement = (req: Request, res: Response, next: NextFunction): void => {
-    // Skip in non-production environments
-    if (process.env.NODE_ENV !== 'production') {
+    // Skip only in development/local/test (fail closed: an unset or mistyped NODE_ENV enforces HTTPS)
+    if (appConfig.isDev) {
         return next();
     }
 
-    // Check if request is already HTTPS
-    // X-Forwarded-Proto is set by load balancers/reverse proxies
-    const proto = req.headers['x-forwarded-proto'] || req.protocol;
-
-    if (proto === 'https') {
+    // req.protocol reads X-Forwarded-Proto only when 'trust proxy' is configured (server.ts),
+    // so a client can't claim HTTPS by sending the header itself.
+    if (req.protocol === 'https') {
         return next();
     }
 
@@ -35,8 +34,8 @@ export const httpsEnforcement = (req: Request, res: Response, next: NextFunction
  * Should only be applied after HTTPS is confirmed
  */
 export const hstsMiddleware = (req: Request, res: Response, next: NextFunction): void => {
-    // Only add HSTS in production over HTTPS
-    if (process.env.NODE_ENV === 'production') {
+    // Add HSTS everywhere except development/local/test
+    if (!appConfig.isDev) {
         // max-age: 1 year (31536000 seconds)
         // includeSubDomains: Apply to all subdomains
         // preload: Allow inclusion in browser preload lists

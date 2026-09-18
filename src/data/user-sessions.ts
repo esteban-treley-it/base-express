@@ -21,7 +21,7 @@ export const getSessionByRefreshJti = (db: DB) => async (jti: string): Promise<U
     const jtiHash = hashJti(jti);
     const [session] = await db.query<UserSessionDB[]>(`
         SELECT * FROM user_sessions 
-        WHERE refresh_jti = $1 AND status = 'active'
+        WHERE refresh_jti = $1 AND status = 'active' AND expires_at > NOW()
     `, [jtiHash]);
     return session || null;
 };
@@ -46,20 +46,23 @@ export const createSession = (db: DB) => async (
 };
 
 /**
- * Updates the refresh token JTI (for token rotation)
+ * Rotates the refresh token JTI, atomically.
+ * The UPDATE only matches while the session still holds the JTI that was presented, so of two
+ * concurrent refreshes with the same token exactly one wins; the other gets null.
+ * Note: expires_at is intentionally NOT extended - a session has an absolute lifetime.
  * JTI is stored as SHA-256 hash for security
  */
 export const rotateRefreshToken = (db: DB) => async (
     sid: string,
+    oldJti: string,
     newJti: string
 ): Promise<UserSessionDB | null> => {
-    const jtiHash = hashJti(newJti);
     const [session] = await db.query<UserSessionDB[]>(`
         UPDATE user_sessions
-        SET refresh_jti = $2, rotated_at = NOW(), last_seen_at = NOW()
-        WHERE sid = $1 AND status = 'active'
+        SET refresh_jti = $3, rotated_at = NOW(), last_seen_at = NOW()
+        WHERE sid = $1 AND status = 'active' AND expires_at > NOW() AND refresh_jti = $2
         RETURNING *
-    `, [sid, jtiHash]);
+    `, [sid, hashJti(oldJti), hashJti(newJti)]);
     return session || null;
 };
 

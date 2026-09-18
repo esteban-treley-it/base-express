@@ -16,13 +16,16 @@ export const getSidExpirationSQL = (): string => {
 };
 
 /**
- * Clears the SID from cookies (for logout)
+ * Clears every auth cookie (for logout).
+ * Names and paths must match the ones used when the cookies were set (controller/auth.ts),
+ * otherwise the browser keeps them.
  */
 export const clearSidFromCookies = (res: {
     clearCookie: (name: string, options?: Record<string, unknown>) => void;
 }): void => {
-    res.clearCookie('sid', { path: '/' });
-    res.clearCookie('access', { path: '/' });
-    res.clearCookie('refresh', { path: '/' });
-    res.clearCookie('id', { path: '/' });
+    res.clearCookie(tokenConfig.names.access, { path: '/' });
+    res.clearCookie(tokenConfig.names.id, { path: '/' });
+    res.clearCookie(tokenConfig.names.refresh, { path: tokenConfig.refreshCookiePath });
+    // Cookies issued before the path change were scoped to /refresh only
+    res.clearCookie(tokenConfig.names.refresh, { path: `${tokenConfig.refreshCookiePath}/refresh` });
 };

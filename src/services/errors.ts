@@ -1,9 +1,16 @@
 import { AppRequest } from "@/types/requests";
 import { NextFunction, Response } from "express";
+import { logger } from "./logger";
 
-class BaseError extends Error {
+export class BaseError extends Error {
     public status: number;
     public data?: unknown;
+    /**
+     * When true, handleRequest COMMITS the transaction instead of rolling it back.
+     * Use only for errors raised after security side effects that must survive the failure
+     * (audit rows for failed logins, session revocation on refresh-token reuse).
+     */
+    public commitOnError = false;
 
     constructor(status: number, message: string, data?: unknown) {
         super(message);
@@ -16,6 +23,12 @@ class BaseError extends Error {
         if (Error.captureStackTrace) {
             Error.captureStackTrace(this, this.constructor);
         }
+    }
+
+    /** Keep the writes made so far in this request even though the request fails. */
+    persist(): this {
+        this.commitOnError = true;
+        return this;
     }
 }
 
@@ -39,6 +52,11 @@ export class Forbidden extends BaseError {
         super(403, message, data);
     }
 }
+export class TooManyRequests extends BaseError {
+    constructor(message = "Too many requests", data?: unknown) {
+        super(429, message, data);
+    }
+}
 export class InternalServerError extends BaseError {
     constructor(message = "Internal server error", data?: unknown) {
         super(500, message, data);
@@ -54,7 +72,7 @@ export class ServiceUnavailable extends BaseError {
 
 // Security: Sanitize sensitive data before logging
 const sanitizeForLogging = (data: Record<string, unknown>): Record<string, unknown> => {
-    const sensitiveKeys = ['password', 'token', 'secret', 'authorization', 'cookie', 'x-access-token', 'x-refresh-token', 'x-id-token', 'x-sid'];
+    const sensitiveKeys = ['password', 'token', 'secret', 'authorization', 'cookie', 'credential', 'x-access-token', 'x-refresh-token', 'x-id-token', 'x-sid'];
     const sanitized = { ...data };
 
     for (const key of Object.keys(sanitized)) {
@@ -71,7 +89,7 @@ const addToErrorTables = (req: AppRequest, error: BaseError) => {
 
     // Skip DB logging if no database connection
     if (!db) {
-        console.warn('[ErrorLog] No database connection, skipping DB log');
+        logger.warn('errors', 'No database connection, skipping DB log');
         return;
     }
 
@@ -79,7 +97,7 @@ const addToErrorTables = (req: AppRequest, error: BaseError) => {
     const safeHeaders = {
         'content-type': req.headers['content-type'],
         'user-agent': req.headers['user-agent'],
-        'x-request-id': req.headers['x-request-id']
+        'x-request-id': String(req.headers['x-request-id'] ?? '').substring(0, 100) || undefined
     };
 
     // Security: Sanitize body before logging
@@ -88,9 +106,10 @@ const addToErrorTables = (req: AppRequest, error: BaseError) => {
     const errorPayload = {
         message: error.message,
         method: req.method.toUpperCase(),
-        route: req.originalUrl,
+        route: req.originalUrl.substring(0, 500), // error_logs.route is VARCHAR(500)
         headers: JSON.stringify(safeHeaders),
-        body: JSON.stringify(sanitizedBody),
+        // Bounded: attacker-controlled bodies must not be able to bloat the table
+        body: JSON.stringify(sanitizedBody).substring(0, 2000),
         user_data: JSON.stringify(user ? { id: user.user_id } : null) // Only log user ID, not full data
     }
 
@@ -102,13 +121,13 @@ const addToErrorTables = (req: AppRequest, error: BaseError) => {
         
         // Check for missing table specifically
         if (errMsg.includes('relation') && errMsg.includes('does not exist')) {
-            console.warn('[ErrorLog] Table "error_logs" does not exist. Run migrations to create it.');
+            logger.warn('errors', 'Table "error_logs" does not exist. Run migrations to create it.');
         } else {
-            console.error('[ErrorLog] Failed to write to DB:', errMsg);
+            logger.error('errors', 'Failed to write to DB:', errMsg);
         }
-        
+
         // Fallback: Log error details to console
-        console.error('[ErrorLog] Error details:', {
+        logger.error('errors', 'Error details:', {
             method: errorPayload.method,
             route: errorPayload.route,
             message: errorPayload.message,
@@ -135,7 +154,7 @@ export const errorHandler = (
     // Log unexpected errors with details
     const errMessage = err instanceof Error ? err.message : 'Unknown error';
     const errStack = err instanceof Error ? err.stack : undefined;
-    console.error('[UnhandledError]', {
+    logger.error('errors', 'UnhandledError:', {
         message: errMessage,
         stack: errStack,
         route: req.originalUrl,

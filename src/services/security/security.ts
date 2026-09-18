@@ -43,19 +43,28 @@ export interface LockoutStatus {
 type LockoutType = 'email' | 'ip';
 
 /**
+ * The per-account lockout is scoped to the (email, IP) pair. A lockout keyed by email alone
+ * lets anyone lock a victim out of their own account with 5 bad requests; scoped to the pair,
+ * an attacker can only lock themselves out. Credential stuffing across many accounts from one
+ * IP is still stopped by the per-IP lockout.
+ */
+const accountLockoutId = (email: string, ip?: string): string => (ip ? `${email}|${ip}` : email);
+
+/**
  * Internal helper to record a failed attempt for a specific key
  */
 const recordAttemptForKey = async (
     type: LockoutType,
     identifier: string
 ): Promise<LockoutStatus> => {
-    const redis = RedisSingleton.getInstance();
     const redisAvailable = await RedisSingleton.ping();
     const config = LOCKOUT_CONFIG[type];
 
     if (!redisAvailable) {
         return { locked: false, attemptsRemaining: config.maxAttempts };
     }
+
+    const redis = RedisSingleton.getInstance();
 
     const key = `${config.keyPrefix}${identifier.toLowerCase()}`;
     const lockoutKey = `${key}:locked`;
@@ -106,13 +115,14 @@ const checkLockoutForKey = async (
     type: LockoutType,
     identifier: string
 ): Promise<LockoutStatus> => {
-    const redis = RedisSingleton.getInstance();
     const redisAvailable = await RedisSingleton.ping();
     const config = LOCKOUT_CONFIG[type];
 
     if (!redisAvailable) {
         return { locked: false, attemptsRemaining: config.maxAttempts };
     }
+
+    const redis = RedisSingleton.getInstance();
 
     const key = `${config.keyPrefix}${identifier.toLowerCase()}`;
     const lockoutKey = `${key}:locked`;
@@ -144,7 +154,7 @@ export const recordFailedAttempt = async (
     ip?: string
 ): Promise<LockoutStatus> => {
     // Record for email
-    const emailResult = await recordAttemptForKey('email', email);
+    const emailResult = await recordAttemptForKey('email', accountLockoutId(email, ip));
 
     // If email is locked, return immediately
     if (emailResult.locked) {
@@ -172,7 +182,7 @@ export const checkLockout = async (
     ip?: string
 ): Promise<LockoutStatus> => {
     // Check email lockout first
-    const emailResult = await checkLockoutForKey('email', email);
+    const emailResult = await checkLockoutForKey('email', accountLockoutId(email, ip));
     if (emailResult.locked) {
         return emailResult;
     }
@@ -194,16 +204,16 @@ export const checkLockout = async (
 
 /**
  * Clears lockout status after successful login
- * Only clears email lockout (IP lockout persists to catch attackers)
+ * Only clears the account (email+IP) lockout (IP lockout persists to catch attackers)
  */
-export const clearLockout = async (email: string): Promise<void> => {
-    const redis = RedisSingleton.getInstance();
+export const clearLockout = async (email: string, ip?: string): Promise<void> => {
     const redisAvailable = await RedisSingleton.ping();
 
     if (!redisAvailable) return;
 
+    const redis = RedisSingleton.getInstance();
     const config = LOCKOUT_CONFIG.email;
-    const key = `${config.keyPrefix}${email.toLowerCase()}`;
+    const key = `${config.keyPrefix}${accountLockoutId(email, ip)}`;
     const lockoutKey = `${key}:locked`;
 
     await redis.del(key);
@@ -221,6 +231,7 @@ export const ALLOWED_TABLES = [
     'password_reset_tokens',
     'orgs',
     'org_users',
+    'user_identities',
 ] as const;
 
 export type AllowedTableName = typeof ALLOWED_TABLES[number];
@@ -232,5 +243,21 @@ export const isValidTableName = (table: string): table is AllowedTableName => {
 export const validateTableName = (table: string): void => {
     if (!isValidTableName(table)) {
         throw new Error(`Invalid table name: ${table}`);
+    }
+};
+
+/**
+ * Column names and savepoint names are interpolated into SQL text (Postgres can't parameterize
+ * identifiers), so they must never carry anything but a plain lowercase identifier.
+ * Every schema column is snake_case, so this is deliberately strict.
+ */
+const SQL_IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;
+
+export const isValidIdentifier = (name: unknown): name is string =>
+    typeof name === 'string' && SQL_IDENTIFIER.test(name);
+
+export const validateColumnName = (column: string): void => {
+    if (!isValidIdentifier(column)) {
+        throw new Error('Invalid column name');
     }
 };
